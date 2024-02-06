@@ -297,7 +297,7 @@ def get_key(db_path, addr_len):
         return key_bytes
 
     def verify_key(key, wx_db_path):
-        if wx_db_path == "None":
+        if not wx_db_path or wx_db_path.lower() == "none":
             return True
         KEY_SIZE = 32
         DEFAULT_PAGESIZE = 4096
@@ -349,7 +349,7 @@ def read_info(version_list, is_logging=False):
     wechat_process = []
     result = []
     error = ""
-    for process in psutil.process_iter(['name', 'exe', 'pid', 'cmdline']):
+    for process in psutil.process_iter(['name', 'exe', 'pid']):
         if process.name() == 'WeChat.exe':
             wechat_process.append(process)
 
@@ -384,7 +384,7 @@ def read_info(version_list, is_logging=False):
             tmp_rd['mobile'] = "None"
             tmp_rd['name'] = "None"
             tmp_rd['mail'] = "None"
-            return -2
+            return tmp_rd['version']
         else:
             name_baseaddr = wechat_base_address + bias_list[0]
             account__baseaddr = wechat_base_address + bias_list[1]

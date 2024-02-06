@@ -1,11 +1,14 @@
 import os.path
 import subprocess
 import sys
+import traceback
 from os import system
 import sqlite3
 import threading
 import xml.etree.ElementTree as ET
 from pilk import decode
+
+from app.log import logger
 
 lock = threading.Lock()
 db_path = "./app/Database/Msg/MediaMSG.db"
@@ -69,12 +72,9 @@ class MediaMsg:
         buf = self.get_media_buffer(reserved0)
         if not buf:
             return ''
-        silk_path = f"{output_path}\\{reserved0}.silk"
-        pcm_path = f"{output_path}\\{reserved0}.pcm"
-        mp3_path = f"{output_path}\\{reserved0}.mp3"
-        silk_path = silk_path.replace("/", "\\")
-        pcm_path = pcm_path.replace("/", "\\")
-        mp3_path = mp3_path.replace("/", "\\")
+        silk_path = f"{output_path}/{reserved0}.silk"
+        pcm_path = f"{output_path}/{reserved0}.pcm"
+        mp3_path = f"{output_path}/{reserved0}.mp3"
         if os.path.exists(mp3_path):
             return mp3_path
         with open(silk_path, "wb") as f:
@@ -87,20 +87,28 @@ class MediaMsg:
             ffmpeg_path = get_ffmpeg_path()
             # # 调用 FFmpeg
             if os.path.exists(ffmpeg_path):
-                cmd = f'''{ffmpeg_path} -loglevel quiet -y -f s16le -i {pcm_path} -ar 44100 -ac 1 {mp3_path}'''
-                system(cmd)
+                cmd = f'''"{ffmpeg_path}" -loglevel quiet -y -f s16le -i "{pcm_path}" -ar 44100 -ac 1 "{mp3_path}"'''
+                # system(cmd)
+                # 使用subprocess.run()执行命令
+                subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             else:
                 # 源码运行的时候下面的有效
                 # 这里不知道怎么捕捉异常
-                cmd = f'''{os.path.join(os.getcwd(), 'app', 'resources', 'data','ffmpeg.exe')} -loglevel quiet -y -f s16le -i {pcm_path} -ar 44100 -ac 1 {mp3_path}'''
-                system(cmd)
+                cmd = f'''"{os.path.join(os.getcwd(), 'app', 'resources', 'data','ffmpeg.exe')}" -loglevel quiet -y -f s16le -i "{pcm_path}" -ar 44100 -ac 1 "{mp3_path}"'''
+                # system(cmd)
+                # 使用subprocess.run()执行命令
+                subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            os.remove(silk_path)
+            os.remove(pcm_path)
         except Exception as e:
             print(f"Error: {e}")
-            cmd = f'''{os.path.join(os.getcwd(), 'app', 'resources', 'data', 'ffmpeg.exe')} -loglevel quiet -y -f s16le -i {pcm_path} -ar 44100 -ac 1 {mp3_path}'''
-            system(cmd)
-        system(f'del {silk_path}')
-        system(f'del {pcm_path}')
-        print(mp3_path)
+            logger.error(f'语音发送错误\n{traceback.format_exc()}')
+            cmd = f'''"{os.path.join(os.getcwd(), 'app', 'resources', 'data', 'ffmpeg.exe')}" -loglevel quiet -y -f s16le -i "{pcm_path}" -ar 44100 -ac 1 "{mp3_path}"'''
+            # system(cmd)
+            # 使用subprocess.run()执行命令
+            subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        finally:
+            print(mp3_path)
         return mp3_path
 
     def get_audio_path(self, reserved0, output_path):

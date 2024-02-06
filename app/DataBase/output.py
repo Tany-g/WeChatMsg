@@ -1,453 +1,435 @@
+import csv
 import os
-import re
 import time
+import traceback
+from typing import List
 
 import docx
-import numpy as np
-import pandas as pd
-import xmltodict
-from PyQt5.QtCore import *
-from docx import shared
-from docx.enum.table import WD_ALIGN_VERTICAL
-from docx.enum.text import WD_COLOR_INDEX, WD_PARAGRAPH_ALIGNMENT
+from PyQt5.QtCore import pyqtSignal, QThread, QObject
+from PyQt5.QtWidgets import QFileDialog
+from docx.oxml.ns import qn
 from docxcompose.composer import Composer
 
-from app import person
-from app.DataBase import data
-from app.log import log
+from app.DataBase.exporter_csv import CSVExporter
+from app.DataBase.exporter_docx import DocxExporter
+from app.DataBase.exporter_html import HtmlExporter
+from app.DataBase.exporter_txt import TxtExporter
+from app.DataBase.hard_link import decodeExtraBuf
+from app.config import output_dir
+from .package_msg import PackageMsg
+from ..DataBase import media_msg_db, hard_link_db, micro_msg_db, msg_db
+from ..log import logger
+from ..person import Me
+from ..util.image import get_image
 
-
-# import data
-
-
-def IS_5_min(last_m, now_m):
-    """
-    #! 判断两次聊天时间是不是大于五分钟
-    #! 若大于五分钟则显示时间
-    #! 否则不显示
-    """
-    '''两次聊天记录时间差，单位是秒'''
-    dt = now_m - last_m
-    return abs(dt // 1000) >= 300
-
-
-def time_format(timestamp):
-    '''
-    #! 将字符串类型的时间戳转换成日期
-    #! 返回格式化的时间字符串
-    #! %Y-%m-%d %H:%M:%S
-    '''
-    timestamp = timestamp / 1000
-    time_tuple = time.localtime(timestamp)
-    return time.strftime("%Y-%m-%d %H:%M:%S", time_tuple)
+os.makedirs(os.path.join(output_dir, '聊天记录'), exist_ok=True)
 
 
 class Output(QThread):
     """
     发送信息线程
     """
+    startSignal = pyqtSignal(int)
     progressSignal = pyqtSignal(int)
     rangeSignal = pyqtSignal(int)
     okSignal = pyqtSignal(int)
+    batchOkSignal = pyqtSignal(int)
+    nowContact = pyqtSignal(str)
     i = 1
     CSV = 0
     DOCX = 1
     HTML = 2
+    CSV_ALL = 3
+    CONTACT_CSV = 4
+    TXT = 5
+    Batch = 10086
 
-    def __init__(self, Me: person.Me, ta_u, parent=None, type_=DOCX):
+    def __init__(self, contact, type_=DOCX, message_types={}, sub_type=[], time_range=None, parent=None):
         super().__init__(parent)
-        self.Me = Me
+        self.children = []
+        self.last_timestamp = 0
+        self.sub_type = sub_type
+        self.time_range = time_range
+        self.message_types = message_types
         self.sec = 2  # 默认1000秒
-        self.ta_username = ta_u
-        self.my_avatar = self.Me.avatar_path
-        self.ta_avatar = data.get_avator(ta_u)
+        self.contact = contact
         self.msg_id = 0
-        self.output_type = type_
-        self.total_num = 0
-
-    @log
-    def merge_docx(self, conRemark, n):
-        origin_docx_path = f"{os.path.abspath('.')}/data/聊天记录/{conRemark}"
-        all_file_path = []
-        for i in range(n):
-            file_name = f"{conRemark}{i}.docx"
-            all_file_path.append(origin_docx_path + '/' + file_name)
-        filename = f"{conRemark}.docx"
-        # print(all_file_path)
-        doc = docx.Document()
-        doc.save(origin_docx_path + '/' + filename)
-        master = docx.Document(origin_docx_path + '/' + filename)
-        middle_new_docx = Composer(master)
-        num = 0
-        for word in all_file_path:
-            word_document = docx.Document(word)
-            word_document.add_page_break()
-            if num != 0:
-                middle_new_docx.append(word_document)
-            num = num + 1
-            os.remove(word)
-        middle_new_docx.save(origin_docx_path + '/' + filename)
+        self.output_type: int | List[int] = type_
+        self.total_num = 1
+        self.num = 0
 
     def progress(self, value):
-        self.i += 1
-        # 处理完成之后将多个文件合并
-        if self.i == self.total_num:
-            QThread.sleep(1)
-            conRemark = data.get_conRemark(self.ta_username)
-            self.progressSignal.emit(self.total_num - 1)
-            self.merge_docx(conRemark, self.n)
-            print('ok')
-            self.progressSignal.emit(self.total_num)
-            self.okSignal.emit(1)
-        self.progressSignal.emit(self.i)
+        self.progressSignal.emit(value)
 
-    @log
-    def to_csv(self, conRemark, path):
-        origin_docx_path = f"{os.path.abspath('.')}/data/聊天记录/{conRemark}"
-        messages = data.get_all_message(self.ta_username)
-        # print(messages)
-        self.Child0 = ChildThread(self.Me, self.ta_username, messages, conRemark, 0, type_=ChildThread.CSV)
-        self.Child0.progressSignal.connect(self.progress)
-        self.Child0.start()
-        print("成功导出CSV文件：", origin_docx_path)
+    def output_image(self):
+        """
+        导出全部图片
+        @return:
+        """
+        return
 
-    def run(self):
-        conRemark = data.get_conRemark(self.ta_username)
-        data.mkdir(f"{os.path.abspath('.')}/data/聊天记录/{conRemark}")
-        if self.output_type == self.DOCX:
-            self.Child = {}
-            if 1:
-                messages = data.get_all_message(self.ta_username)
-                self.total_num = len(messages)
-                self.rangeSignal.emit(self.total_num)
-                l = len(messages)
-                self.n = 10
-                for i in range(self.n):
-                    q = i * (l // self.n)
-                    p = (i + 1) * (l // self.n)
-                    if i == self.n - 1:
-                        p = l
-                    len_data = messages[q:p]
-                    # self.to_docx(len_data, i, conRemark)
-                    self.Child[i] = ChildThread(self.Me, self.ta_username, len_data, conRemark, i)
-                    self.Child[i].progressSignal.connect(self.progress)
-                    self.Child[i].start()
-        elif self.output_type == self.CSV:
-            # print("线程导出csv")
-            # self.to_csv(self.ta_username, "path")
-            origin_docx_path = f"{os.path.abspath('.')}/data/聊天记录/{self.ta_username}"
-            messages = data.get_all_message(self.ta_username)
-            # print(messages)
-            self.Child0 = ChildThread(self.Me, self.ta_username, messages, conRemark, 0, type_=ChildThread.CSV)
-            self.Child0.progressSignal.connect(self.progress)
-            self.Child0.run()
-            self.okSignal.emit(1)
+    def output_emoji(self):
+        """
+        导出全部表情包
+        @return:
+        """
+        return
 
+    def to_csv_all(self):
+        """
+        导出全部聊天记录到CSV
+        @return:
+        """
 
-class ChildThread(QThread):
-    """
-        子线程，用于导出部分聊天记录
-    """
-    progressSignal = pyqtSignal(int)
-    rangeSignal = pyqtSignal(int)
-    i = 1
-    CSV = 0
-    DOCX = 1
-    HTML = 2
+        origin_path = os.path.join(os.path.abspath('.'), output_dir, '聊天记录')
+        os.makedirs(origin_path, exist_ok=True)
+        filename = QFileDialog.getSaveFileName(None, "save file", os.path.join(os.getcwd(), 'messages.csv'),
+                                               "csv files (*.csv);;all files(*.*)")
+        if not filename[0]:
+            return
+        self.startSignal.emit(1)
+        filename = filename[0]
+        # columns = ["用户名", "消息内容", "发送时间", "发送状态", "消息类型", "isSend", "msgId"]
+        columns = ['localId', 'TalkerId', 'Type', 'SubType',
+                   'IsSender', 'CreateTime', 'Status', 'StrContent',
+                   'StrTime', 'Remark', 'NickName', 'Sender']
 
-    def __init__(self, Me: person.Me, ta_u, message, conRemark, num, parent=None, type_=DOCX):
-        super().__init__(parent)
-        self.Me = Me
-        self.sec = 2  # 默认1000秒
-        self.ta_username = ta_u
-        self.num = num
-        self.my_avatar = self.Me.avatar_path
-        self.ta_avatar = data.get_avator(ta_u)
-        self.conRemark = conRemark
-        self.message = message
-        self.msg_id = 0
-        self.output_type = type_
+        packagemsg = PackageMsg()
+        messages = packagemsg.get_package_message_all()
+        # 写入CSV文件
+        with open(filename, mode='w', newline='', encoding='utf-8-sig') as file:
+            writer = csv.writer(file)
+            writer.writerow(columns)
+            # 写入数据
+            writer.writerows(messages)
+        self.okSignal.emit(1)
 
-    def create_table(self, doc, isSend):
-        '''
-        #! 创建一个1*2表格
-        #! isSend = 1 (0,0)存聊天内容，(0,1)存头像
-        #! isSend = 0 (0,0)存头像，(0,1)存聊天内容
-        #! 返回聊天内容的坐标
-        '''
-        table = doc.add_table(rows=1, cols=2, style='Normal Table')
-        table.cell(0, 1).height = shared.Inches(0.5)
-        table.cell(0, 0).height = shared.Inches(0.5)
-        text_size = 1
-        if isSend:
-            '''表格右对齐'''
-            table.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
-            avatar = table.cell(0, 1).paragraphs[0].add_run()
-            '''插入头像，设置头像宽度'''
-            avatar.add_picture(self.my_avatar, width=shared.Inches(0.5))
-            '''设置单元格宽度跟头像一致'''
-            table.cell(0, 1).width = shared.Inches(0.5)
-            content_cell = table.cell(0, 0)
-            '''聊天内容右对齐'''
-            content_cell.paragraphs[0].paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
-        else:
-            avatar = table.cell(0, 0).paragraphs[0].add_run()
-            avatar.add_picture(self.ta_avatar, width=shared.Inches(0.5))
-            '''设置单元格宽度'''
-            table.cell(0, 0).width = shared.Inches(0.5)
-            content_cell = table.cell(0, 1)
-        '''聊天内容垂直居中对齐'''
-        content_cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-        return content_cell
-
-    def text(self, doc, isSend, message, status):
-        if status == 5:
-            message += '（未发出） '
-        content_cell = self.create_table(doc, isSend)
-        content_cell.paragraphs[0].add_run(message)
-        content_cell.paragraphs[0].font_size = shared.Inches(0.5)
-        # self.self_text.emit(message)
-        if isSend:
-            p = content_cell.paragraphs[0]
-            p.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
-        doc.add_paragraph()
-
-    def image(self, doc, isSend, Type, content, imgPath):
-        '''
-        #! 插入聊天图片
-        #! isSend = 1 只有缩略图
-        #! isSend = 0 有原图
-        :param doc:
-        :param isSend:
-        :param Type:
-        :param content:
-        :param imgPath:
-        :return:
-        '''
-        content = self.create_table(doc, isSend)
-        run = content.paragraphs[0].add_run()
-        if Type == 3:
-            imgPath = imgPath.split('th_')[1]
-            imgPath = f'./app/data/image2/{imgPath[0:2]}/{imgPath[2:4]}/th_{imgPath}'
-            imgPath = data.clearImagePath(imgPath)
-        try:
-            run.add_picture(f'{imgPath}', height=shared.Inches(2))
-            doc.add_paragraph()
-        except Exception:
-            print("Error!image")
-
-        # run.add_picture(f'{Path}/{imgPath}', height=shared.Inches(2))
-
-    def emoji(self, doc, isSend, content, imgPath):
-        '''
-        #! 添加表情包
-        :param isSend:
-        :param content:
-        :param imgPath:
-        :return:
-        '''
-        imgPath = data.get_emoji(imgPath)
-        if 1:
-            is_Exist = os.path.exists(imgPath)
-            self.image(doc, isSend, Type=47, content=content, imgPath=imgPath)
-
-    def wx_file(self, doc, isSend, content, status):
-        '''
-        #! 添加微信文件
-        :param isSend:
-        :param content:
-        :param status:
-        :return:
-        '''
-        pattern = re.compile(r"<title>(.*?)<")
-        r = pattern.search(content).group()
-        filename = r.lstrip('<title>').rstrip('<')
-        self.text(doc, isSend, filename, status)
-
-    def retract_message(self, doc, isSend, content, status):
-        '''
-        #! 显示撤回消息
-        :param isSend:
-        :param content:
-        :param status:
-        :return:
-        '''
-        paragraph = doc.add_paragraph(content)
-        paragraph.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-
-    def reply(self, doc, isSend, content, status):
-        '''
-        #! 添加回复信息
-        :param isSend:
-        :param content:
-        :param status:
-        :return:
-        '''
-        pattern1 = re.compile(r"<title>(?P<title>(.*?))</title>")
-        title = pattern1.search(content).groupdict()['title']
-        pattern2 = re.compile(r"<displayname>(?P<displayname>(.*?))</displayname>")
-        displayname = pattern2.search(content).groupdict()['displayname']
-        '''匹配回复的回复'''
-        pattern3 = re.compile(r"\n?title&gt;(?P<content>(.*?))\n?&lt;/title&gt")
-        if not pattern3.search(content):
-            if isSend == 0:
-                '''匹配对方的回复'''
-                pattern3 = re.compile(r"<content>(?P<content>(.*?))</content>")
-            else:
-                '''匹配自己的回复'''
-                pattern3 = re.compile(r"</msgsource>\n?<content>(?P<content>(.*?))\n?</content>")
-
-        '''这部分代码完全可以用if代替'''
-
-        try:
-            '''试错'''
-            text = pattern3.search(content).groupdict()['content']
-        except Exception:
-            try:
-                '''试错'''
-                text = pattern3.search(content).groupdict()['content']
-            except Exception:
-                '''试错'''
-                pattern3 = re.compile(r"\n?<content>(?P<content>(.*?))\n?</content>")
-                '''试错'''
-                if pattern3.search(content):
-                    text = pattern3.search(content).groupdict()['content']
+    def contact_to_csv(self):
+        """
+        导出联系人到CSV
+        @return:
+        """
+        filename = QFileDialog.getSaveFileName(None, "save file", os.path.join(os.getcwd(), 'contacts.csv'),
+                                               "csv files (*.csv);;all files(*.*)")
+        if not filename[0]:
+            return
+        self.startSignal.emit(1)
+        filename = filename[0]
+        # columns = ["用户名", "消息内容", "发送时间", "发送状态", "消息类型", "isSend", "msgId"]
+        columns = ['UserName', 'Alias', 'Type', 'Remark', 'NickName', 'PYInitial', 'RemarkPYInitial', 'smallHeadImgUrl',
+                   'bigHeadImgUrl', 'label', 'gender', 'telephone', 'signature', 'country/region', 'province', 'city']
+        contacts = micro_msg_db.get_contact()
+        # 写入CSV文件
+        with open(filename, mode='w', newline='', encoding='utf-8-sig') as file:
+            writer = csv.writer(file)
+            writer.writerow(columns)
+            # 写入数据
+            # writer.writerows(contacts)
+            for contact in contacts:
+                detail = decodeExtraBuf(contact[9])
+                gender_code = detail.get('gender')
+                if gender_code == 0:
+                    gender = '未知'
+                elif gender_code == 1:
+                    gender = '男'
                 else:
-                    text = '图片'
-        if status == 5:
-            message = '（未发出） ' + ''
-        content_cell = self.create_table(doc, isSend)
-        content_cell.paragraphs[0].add_run(title)
-        content_cell.paragraphs[0].font_size = shared.Inches(0.5)
-        reply_p = content_cell.add_paragraph()
-        run = content_cell.paragraphs[1].add_run(displayname + ':' + text)
-        '''设置被回复内容格式'''
-        run.font.color.rgb = shared.RGBColor(121, 121, 121)
-        run.font_size = shared.Inches(0.3)
-        run.font.highlight_color = WD_COLOR_INDEX.GRAY_25
+                    gender = '女'
+                writer.writerow([*contact[:9], contact[10], gender, detail.get('telephone'), detail.get('signature'),
+                                 *detail.get('region')])
 
-        if isSend:
-            p = content_cell.paragraphs[0]
-            p.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
-            reply_p.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
-        doc.add_paragraph()
+        self.okSignal.emit(1)
 
-    def pat_a_pat(self, doc, isSend, content, status):
-        """
-        #! 添加拍一拍信息
-        todo 把wxid转化成昵称
-        :param isSend:
-        :param content:
-        :param status:
-        :return:
-        """
-        try:
-            pat_data = xmltodict.parse(content)
-            pat_data = pat_data['msg']['appmsg']['patMsg']['records']['record']
-            fromUser = pat_data['fromUser']
-            pattedUser = pat_data['pattedUser']
-            template = pat_data['template']
-            template = ''.join(template.split('${pattedusername@textstatusicon}'))
-            template = ''.join(template.split('${fromusername@textstatusicon}'))
-            template = template.replace(f'${{{fromUser}}}', data.get_conRemark(fromUser))
-            template = template.replace(f'${{{pattedUser}}}', data.get_conRemark(pattedUser))
-            print(template)
-        except Exception as e:
-            print(e)
-            template = '糟糕！出错了。'
-        p = doc.add_paragraph()
-        run = p.add_run(template)
-        p.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-        '''设置拍一拍文字格式'''
-        run.font.color.rgb = shared.RGBColor(121, 121, 121)
-        run.font_size = shared.Inches(0.3)
-        # run.font.highlight_color=WD_COLOR_INDEX.GRAY_25
+    def batch_export(self):
+        print('开始批量导出')
+        print(self.sub_type, self.message_types)
+        print(len(self.contact))
+        print([contact.remark for contact in self.contact])
+        self.batch_num_total = len(self.contact) * len(self.sub_type)
+        self.batch_num = 0
+        self.rangeSignal.emit(self.batch_num_total)
+        for contact in self.contact:
+            # print('联系人', contact.remark)
+            for type_ in self.sub_type:
+                # print('导出类型', type_)
+                if type_ == self.DOCX:
+                    self.to_docx(contact, self.message_types, True)
+                elif type_ == self.TXT:
+                    # print('批量导出txt')
+                    self.to_txt(contact, self.message_types, True)
+                elif type_ == self.CSV:
+                    self.to_csv(contact, self.message_types, True)
+                elif type_ == self.HTML:
+                    self.to_html(contact, self.message_types, True)
 
-    def video(self, doc, isSend, content, status, img_path):
-        print(content, img_path)
+    def batch_finish_one(self, num):
+        self.nowContact.emit(self.contact[self.batch_num // len(self.sub_type)].remark)
+        self.batch_num += 1
+        if self.batch_num == self.batch_num_total:
+            self.okSignal.emit(1)
 
-    def to_docx(self, messages, i, conRemark):
-        '''创建联系人目录'''
+    def merge_docx(self, n):
+        conRemark = self.contact.remark
+        origin_path = os.path.join(os.path.abspath('.'), output_dir, '聊天记录',conRemark)
+        filename = f"{origin_path}/{conRemark}_{n}.docx"
+        if n == 10086:
+            # self.document.append(self.document)
+            file = os.path.join(origin_path, f'{conRemark}.docx')
+            try:
+                self.document.save(file)
+            except PermissionError:
+                file = file[:-5] + f'{time.time()}' + '.docx'
+                self.document.save(file)
+            self.okSignal.emit(1)
+            return
+        doc = docx.Document(filename)
+        self.document.append(doc)
+        os.remove(filename)
+        if n % 50 == 0:
+            # self.document.append(self.document)
+            file = os.path.join(origin_path, f'{conRemark}-{n // 50}.docx')
+            try:
+                self.document.save(file)
+            except PermissionError:
+                file = file[:-5] + f'{time.time()}' + '.docx'
+                self.document.save(file)
+            doc = docx.Document()
+            doc.styles["Normal"].font.name = "Cambria"
+            doc.styles["Normal"]._element.rPr.rFonts.set(qn("w:eastAsia"), "宋体")
+            self.document = Composer(doc)
 
-        filename = f"{os.path.abspath('.')}/data/聊天记录/{conRemark}/{conRemark}{i}.docx"
+    def to_docx(self, contact, message_types, is_batch=False):
         doc = docx.Document()
-        last_timestamp = 1601968667000
+        doc.styles["Normal"].font.name = "Cambria"
+        doc.styles["Normal"]._element.rPr.rFonts.set(qn("w:eastAsia"), "宋体")
+        self.document = Composer(doc)
+        Child = DocxExporter(contact, type_=self.DOCX, message_types=message_types, time_range=self.time_range)
+        self.children.append(Child)
+        Child.progressSignal.connect(self.progress)
+        if not is_batch:
+            Child.rangeSignal.connect(self.rangeSignal)
+        Child.okSignal.connect(self.merge_docx if not is_batch else self.batch_finish_one)
+        Child.start()
 
-        for message in messages:
-            self.progressSignal.emit(self.i)
-            self.i += 1
-            msgId = message[0]
-            ta_username = message[7]
-            Type = int(message[2])
-            isSend = message[4]
-            content = message[8]
-            imgPath = message[9]
-            now_timestamp = message[6]
-            status = message[3]
-            createTime = time_format(now_timestamp)
-            # print(createTime, isSend, content)
-            if IS_5_min(last_timestamp, now_timestamp):
-                doc.add_paragraph(createTime).alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-            last_timestamp = now_timestamp
-            if Type == 1:
-                try:
-                    self.text(doc, isSend, content, status)
-                except Exception as e:
-                    print(e)
-            elif Type == 3:
-                self.image(doc, isSend, 3, content, imgPath)
-            elif Type == 47:
-                self.emoji(doc, isSend, content, imgPath)
-            elif Type == 1090519089:
-                self.wx_file(doc, isSend, content, status)
-            elif Type == 268445456:
-                self.retract_message(doc, isSend, content, status)
-            elif Type == 822083633:
-                self.reply(doc, isSend, content, status)
-            elif Type == 922746929:
-                self.pat_a_pat(doc, isSend, content, status)
-            elif Type == 43:
-                # print(createTime)
-                self.video(doc, isSend, content, status, imgPath)
-        # doc.add_paragraph(str(i))
-        print(filename)
-        doc.save(filename)
+    def to_txt(self, contact, message_types, is_batch=False):
+        Child = TxtExporter(contact, type_=self.TXT, message_types=message_types, time_range=self.time_range)
+        self.children.append(Child)
+        Child.progressSignal.connect(self.progress)
+        if not is_batch:
+            Child.rangeSignal.connect(self.rangeSignal)
+        Child.okSignal.connect(self.okSignal if not is_batch else self.batch_finish_one)
+        Child.start()
 
-    def to_csv(self, messages, i, conRemark):
-        '''创建联系人目录'''
-        # print('123', messages)
-        filename = f"{os.path.abspath('.')}/data/聊天记录/{conRemark}/{conRemark}.csv"
-        last_timestamp = 1601968667000
-        columns = ["用户名", "消息内容", "发送时间", "发送状态", "消息类型", "isSend", "msgId"]
-        df = pd.DataFrame()
-        df["用户名"] = np.array(list(map(lambda x: x[7], messages)))
-        df["消息内容"] = np.array(list(map(lambda x: x[8], messages)))
-        df["发送时间"] = np.array(list(map(lambda x: time_format(x[6]), messages)))
-        df["发送状态"] = np.array(list(map(lambda x: x[3], messages)))
-        df["消息类型"] = np.array(list(map(lambda x: x[2], messages)))
-        df["isSend"] = np.array(list(map(lambda x: x[4], messages)))
-        df["msgId"] = np.array(list(map(lambda x: x[0], messages)))
-        df.to_csv(filename)
-        # df.to_csv('data.csv')
-        print(df)
-        self.progressSignal.emit(self.num)
+    def to_html(self, contact, message_types, is_batch=False):
+        Child = HtmlExporter(contact, type_=self.output_type, message_types=message_types, time_range=self.time_range)
+        self.children.append(Child)
+        Child.progressSignal.connect(self.progress)
+        if not is_batch:
+            Child.rangeSignal.connect(self.rangeSignal)
+        Child.okSignal.connect(self.count_finish_num)
+        Child.start()
+        self.total_num = 1
+        if message_types.get(34):
+            # 语音消息单独的线程
+            self.total_num += 1
+            output_media = OutputMedia(contact, time_range=self.time_range)
+            self.children.append(output_media)
+            output_media.okSingal.connect(self.count_finish_num)
+            output_media.progressSignal.connect(self.progressSignal)
+            output_media.start()
+        if message_types.get(47):
+            # emoji消息单独的线程
+            self.total_num += 1
+            output_emoji = OutputEmoji(contact, time_range=self.time_range)
+            self.children.append(output_emoji)
+            output_emoji.okSingal.connect(self.count_finish_num)
+            output_emoji.progressSignal.connect(self.progressSignal)
+            output_emoji.start()
+        if message_types.get(3):
+            # 图片消息单独的线程
+            self.total_num += 1
+            output_image = OutputImage(contact, time_range=self.time_range)
+            self.children.append(output_image)
+            output_image.okSingal.connect(self.count_finish_num)
+            output_image.progressSignal.connect(self.progressSignal)
+            output_image.start()
 
-    def to_html(self, messages, i, conRemark):
-        pass
+    def to_csv(self, contact, message_types, is_batch=False):
+        Child = CSVExporter(contact, type_=self.CSV, message_types=message_types, time_range=self.time_range)
+        self.children.append(Child)
+        Child.progressSignal.connect(self.progress)
+        if not is_batch:
+            Child.rangeSignal.connect(self.rangeSignal)
+        Child.okSignal.connect(self.okSignal if not is_batch else self.batch_finish_one)
+        Child.start()
 
     def run(self):
         if self.output_type == self.DOCX:
-            # print("导出docx")
-            self.to_docx(self.message, self.num, self.conRemark)
+            self.to_docx(self.contact, self.message_types)
+        elif self.output_type == self.CSV_ALL:
+            self.to_csv_all()
+        elif self.output_type == self.CONTACT_CSV:
+            self.contact_to_csv()
+        elif self.output_type == self.TXT:
+            self.to_txt(self.contact, self.message_types)
         elif self.output_type == self.CSV:
-            print("导出csv001")
-            # print('00', self.message[0])
-            self.to_csv(self.message, self.num, self.conRemark)
+            self.to_csv(self.contact, self.message_types)
+        elif self.output_type == self.HTML:
+            self.to_html(self.contact, self.message_types)
+        elif self.output_type == self.Batch:
+            self.batch_export()
+
+    def count_finish_num(self, num):
+        """
+        记录子线程完成个数
+        @param num:
+        @return:
+        """
+        self.num += 1
+        if self.num == self.total_num:
+            # 所有子线程都完成之后就发送完成信号
+            if self.output_type == self.Batch:
+                self.batch_finish_one(1)
+            else:
+                self.okSignal.emit(1)
+            self.num = 0
+
+    def cancel(self):
+        self.requestInterruption()
 
 
-if __name__ == '__main__':
-    # wxid_0o18ef858vnu22
-    # wxid_fdkbu92el15h22
-    me = data.Me_Person('wxid_fdkbu92el15h22')
-    t = Output(Me=me, ta_u='wxid_0o18ef858vnu22', type_=Output.CSV)
-    t.run()
+class OutputMedia(QThread):
+    """
+    导出语音消息
+    """
+    okSingal = pyqtSignal(int)
+    progressSignal = pyqtSignal(int)
+
+    def __init__(self, contact, time_range=None):
+        super().__init__()
+        self.contact = contact
+        self.time_range = time_range
+
+    def run(self):
+        origin_path = os.path.join(os.path.abspath('.'),output_dir,'聊天记录',self.contact.remark)
+        messages = msg_db.get_messages_by_type(self.contact.wxid, 34, time_range=self.time_range)
+        for message in messages:
+            is_send = message[4]
+            msgSvrId = message[9]
+            try:
+                audio_path = media_msg_db.get_audio(msgSvrId, output_path=origin_path + "/voice")
+            except:
+                logger.error(traceback.format_exc())
+            finally:
+                self.progressSignal.emit(1)
+        self.okSingal.emit(34)
+
+
+class OutputEmoji(QThread):
+    """
+    导出表情包
+    """
+    okSingal = pyqtSignal(int)
+    progressSignal = pyqtSignal(int)
+
+    def __init__(self, contact, time_range=None):
+        super().__init__()
+        self.contact = contact
+        self.time_range = time_range
+
+    def run(self):
+        origin_path = os.path.join(os.path.abspath('.'),output_dir,'聊天记录',self.contact.remark)
+        messages = msg_db.get_messages_by_type(self.contact.wxid, 47, time_range=self.time_range)
+        for message in messages:
+            str_content = message[7]
+            try:
+                pass
+                # emoji_path = get_emoji(str_content, thumb=True, output_path=origin_path + '/emoji')
+            except:
+                logger.error(traceback.format_exc())
+            finally:
+                self.progressSignal.emit(1)
+        self.okSingal.emit(47)
+
+
+class OutputImage(QThread):
+    """
+    导出图片
+    """
+    okSingal = pyqtSignal(int)
+    progressSignal = pyqtSignal(int)
+
+    def __init__(self, contact, time_range):
+        super().__init__()
+        self.contact = contact
+        self.child_thread_num = 2
+        self.time_range = time_range
+        self.child_threads = [0] * (self.child_thread_num + 1)
+        self.num = 0
+
+    def count1(self, num):
+        self.num += 1
+        print('图片导出完成一个')
+        if self.num == self.child_thread_num:
+            self.okSingal.emit(47)
+            print('图片导出完成')
+
+    def run(self):
+        origin_path = os.path.join(os.path.abspath('.'),output_dir,'聊天记录',self.contact.remark)
+        messages = msg_db.get_messages_by_type(self.contact.wxid, 3, time_range=self.time_range)
+        base_path = os.path.join(output_dir,'聊天记录',self.contact.remark,'image')
+        for message in messages:
+            str_content = message[7]
+            BytesExtra = message[10]
+            timestamp = message[5]
+            try:
+                image_path = hard_link_db.get_image(str_content, BytesExtra, up_dir=Me().wx_dir, thumb=False)
+                image_path = get_image(image_path, base_path=base_path)
+                try:
+                    os.utime(origin_path + image_path[1:], (timestamp, timestamp))
+                except:
+                    pass
+            except:
+                logger.error(traceback.format_exc())
+            finally:
+                self.progressSignal.emit(1)
+        self.okSingal.emit(47)
+
+
+class OutputImageChild(QThread):
+    okSingal = pyqtSignal(int)
+    progressSignal = pyqtSignal(int)
+
+    def __init__(self, contact, messages, time_range):
+        super().__init__()
+        self.contact = contact
+        self.messages = messages
+        self.time_range = time_range
+
+    def run(self):
+        origin_path = os.path.join(os.path.abspath('.'),output_dir,'聊天记录',self.contact.remark)
+        for message in self.messages:
+            str_content = message[7]
+            BytesExtra = message[10]
+            timestamp = message[5]
+            try:
+                image_path = hard_link_db.get_image(str_content, BytesExtra, thumb=False)
+                if not os.path.exists(os.path.join(Me().wx_dir, image_path)):
+                    image_thumb_path = hard_link_db.get_image(str_content, BytesExtra, thumb=True)
+                    if not os.path.exists(os.path.join(Me().wx_dir, image_thumb_path)):
+                        continue
+                    image_path = image_thumb_path
+                image_path = get_image(image_path, base_path=f'/data/聊天记录/{self.contact.remark}/image')
+                try:
+                    os.utime(origin_path + image_path[1:], (timestamp, timestamp))
+                except:
+                    pass
+            except:
+                logger.error(traceback.format_exc())
+            finally:
+                self.progressSignal.emit(1)
+        self.okSingal.emit(47)
+        print('图片子线程完成')
+
+
+if __name__ == "__main__":
+    pass

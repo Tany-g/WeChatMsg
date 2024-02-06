@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,9 +7,10 @@
     <link rel="stylesheet" href="https://memotrace.lc044.love/static/css/style.css">
     <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/echarts@latest/dist/echarts.min.js"></script>
     <script type="text/javascript" src="https://assets.pyecharts.org/assets/v5/echarts-wordcloud.min.js"></script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/fullpage.js/dist/fullpage.min.css" />
+    <link rel="stylesheet" href="https://memotrace.lc044.love/static/css/fullpage.min.css" />
     <script src="https://code.jquery.com/jquery-3.6.4.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/fullpage.js/dist/fullpage.min.js"></script>
+    <script src="https://memotrace.lc044.love/static/js/fullpage.min.js"></script>
+    <script src="https://davidshimjs.github.io/qrcodejs/qrcode.min.js"></script>
 </head>
 <body>
     <div id="snow"></div>
@@ -228,13 +229,62 @@
                 <div id="calendar-chart" class="calendar-chart"></div>
             </div>
     </div>
-    <div class="section">
-        <h1 style="text-align: center;">敬请期待</h1>
+    <div class="section" style="text-align: center;display:flex;justify-content: center;align-items: center;"> 
+        <h1>分享此页面</h1>
+        <div>
+            <a id="share" href="https://memotrace.lc044.love/" target="_blank">https://memotrace.lc044.love/</a>
+        </div>
+        <button onclick="confirmUpload()">上传并显示二维码</button>
+        <div id="qrcode"></div>
+        <a href="https://memotrace.lc044.love/" target="_blank">点击生成我的年度聊天报告</a>
     </div>
     <!-- Add more sections as needed -->
 </div>
+  <script>
+        function confirmUpload() {
+            var userConfirmed = confirm("注意！！！\n本页面将会上传至云端，别人可通过链接查看该网页，该操作不会上传您的其他任何信息，页面将在下个版本更新之后删除，请注意链接生效时间。\n点击“确认”代表您同意上传，否则请点击“取消");
 
+            if (userConfirmed) {
+                // User clicked OK, perform the upload and display QR code
+                uploadAndDisplayQRCode();
+            } else {
+                // User clicked Cancel or closed the dialog
+                alert("Upload canceled.");
+            }
+        }
 
+        function uploadAndDisplayQRCode() {
+            // Simulate a GET request to the server endpoint
+            fetch('http://127.0.0.1:21314/upload')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        displayQRCode(data.url);
+                    } else {
+                        if(data.code==201){
+                            displayQRCode(data.url);
+                            alert(data.errmsg);
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Error: Unable to fetch data from the server.');
+                });
+        }
+
+        function displayQRCode(url) {
+            var qrcode = new QRCode(document.getElementById("qrcode"), {
+                text: url,
+                width: 128,
+                height: 128
+            });
+            var aObj = document.getElementById("share");
+            aObj.href = url;
+            //根据id获取超链接,设置文字内容
+            aObj.innerText = url;
+        }
+    </script>
 <script>
     // JavaScript 代码用于生成聊天内容和雪花动画
     document.addEventListener('DOMContentLoaded', function () {

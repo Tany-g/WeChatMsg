@@ -1,12 +1,15 @@
-from PyQt5.QtCore import QThread, pyqtSignal
-from PyQt5.QtWidgets import QWidget, QMessageBox, QAction, QLineEdit
+from typing import List
 
-from app.DataBase import micro_msg_db, misc_db
+from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtWidgets import QWidget, QMessageBox, QAction, QLineEdit, QLabel
+
+from app.DataBase import micro_msg_db, misc_db, close_db
 from app.components import ContactQListWidgetItem, ScrollBar
-from app.person import ContactPC
+from app.person import Contact
 from app.ui.Icon import Icon
 from .contactInfo import ContactInfo
 from .contactUi import Ui_Form
+from ...DataBase.hard_link import decodeExtraBuf
 from ...util import search
 
 # 美化样式表
@@ -61,7 +64,9 @@ class ContactWindow(QWidget, Ui_Form):
         self.setStyleSheet(Stylesheet)
         self.init_ui()
         self.contacts = [[], []]
+        self.contacts_list:List[Contact] = []
         self.show_contacts()
+        self.contact_info_window = None
 
     def init_ui(self):
         search_action = QAction(self.lineEdit)
@@ -75,6 +80,10 @@ class ContactWindow(QWidget, Ui_Form):
         self.stackedWidget.setCurrentIndex(0)
 
     def show_contacts(self):
+        """
+        创建一个子线程来获取联系人并通过信号传递联系人信息
+        @return:
+        """
         # return
         if self.ok_flag:
             return
@@ -94,20 +103,32 @@ class ContactWindow(QWidget, Ui_Form):
         self.ok_flag = True
 
     def search_contact(self):
+        """
+        搜索联系人
+        @return:
+        """
         keyword = self.lineEdit.text()
         if keyword:
             index = search.search_by_content(keyword, self.contacts)
             self.listWidget.setCurrentRow(index)
             self.stackedWidget.setCurrentIndex(index)
 
-    def show_contact(self, contact: ContactPC):
+    def show_contact(self, contact: Contact):
+        """
+        显示联系人
+        @param contact:联系人对象
+        @return:
+        """
+        # return
         self.contacts[0].append(contact.remark)
         self.contacts[1].append(contact.nickName)
         contact_item = ContactQListWidgetItem(contact.remark, contact.smallHeadImgUrl, contact.smallHeadImgBLOG)
         self.listWidget.addItem(contact_item)
         self.listWidget.setItemWidget(contact_item, contact_item.widget)
-        contact_info_window = ContactInfo(contact)
-        self.stackedWidget.addWidget(contact_info_window)
+        self.contacts_list.append(contact)
+        if self.contact_info_window is None:
+            self.contact_info_window = ContactInfo(contact)
+            self.stackedWidget.addWidget(self.contact_info_window)
 
     def setCurrentIndex(self, row):
         # print(row)
@@ -117,11 +138,12 @@ class ContactWindow(QWidget, Ui_Form):
         item = self.listWidget.item(row)
         item.select()
         self.now_index = row
-        self.stackedWidget.setCurrentIndex(row)
+        # self.stackedWidget.setCurrentIndex(row)
+        self.contact_info_window.set_contact(self.contacts_list[row])
 
 
 class ShowContactThread(QThread):
-    showSingal = pyqtSignal(ContactPC)
+    showSingal = pyqtSignal(Contact)
     load_finish_signal = pyqtSignal(bool)
 
     # heightSingal = pyqtSignal(int)
@@ -130,17 +152,30 @@ class ShowContactThread(QThread):
 
     def run(self) -> None:
         contact_info_lists = micro_msg_db.get_contact()
+        if not contact_info_lists:
+            self.load_finish_signal.emit(True)
+            # QMessageBox.critical(None, "错误", "数据库错误，请重启电脑后重试")
+            close_db()
+            import shutil
+            try:
+                shutil.rmtree('./app/Database/Msg')
+            except:
+                pass
+            return
         for contact_info_list in contact_info_lists:
-            # UserName, Alias,Type,Remark,NickName,PYInitial,RemarkPYInitial,ContactHeadImgUrl.smallHeadImgUrl,ContactHeadImgUrl,bigHeadImgUrl
+            # UserName, Alias,Type,Remark,NickName,PYInitial,RemarkPYInitial,ContactHeadImgUrl.smallHeadImgUrl,ContactHeadImgUrl,bigHeadImgUrl,ExtraBuf
+            detail = decodeExtraBuf(contact_info_list[9])
             contact_info = {
                 'UserName': contact_info_list[0],
                 'Alias': contact_info_list[1],
                 'Type': contact_info_list[2],
                 'Remark': contact_info_list[3],
                 'NickName': contact_info_list[4],
-                'smallHeadImgUrl': contact_info_list[7]
+                'smallHeadImgUrl': contact_info_list[7],
+                'detail': detail,
+                'label_name': contact_info_list[10],
             }
-            contact = ContactPC(contact_info)
+            contact = Contact(contact_info)
             contact.smallHeadImgBLOG = misc_db.get_avatar_buffer(contact.wxid)
             contact.set_avatar(contact.smallHeadImgBLOG)
             self.showSingal.emit(contact)
@@ -149,7 +184,7 @@ class ShowContactThread(QThread):
 
 
 class ShowThread(QThread):
-    showSingal = pyqtSignal(ContactPC)
+    showSingal = pyqtSignal(Contact)
     load_finish_signal = pyqtSignal(bool)
 
     # heightSingal = pyqtSignal(int)

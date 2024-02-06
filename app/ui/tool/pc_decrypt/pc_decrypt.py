@@ -3,6 +3,7 @@ import os.path
 import sys
 import traceback
 
+import requests
 from PyQt5.QtCore import pyqtSignal, QThread, QUrl
 from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtWidgets import QWidget, QMessageBox, QFileDialog
@@ -10,6 +11,7 @@ from PyQt5.QtWidgets import QWidget, QMessageBox, QFileDialog
 from app.DataBase import msg_db, misc_db, close_db
 from app.DataBase.merge import merge_databases, merge_MediaMSG_databases
 from app.components.QCursorGif import QCursorGif
+from app.config import info_file_path, db_dir
 from app.decrypt import get_wx_info, decrypt
 from app.log import logger
 from app.util import path
@@ -20,14 +22,17 @@ from ...Icon import Icon
 class DecryptControl(QWidget, decryptUi.Ui_Dialog, QCursorGif):
     DecryptSignal = pyqtSignal(bool)
     get_wxidSignal = pyqtSignal(str)
+    versionErrorSignal = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super(DecryptControl, self).__init__(parent)
+        self.max_val = 0
         self.setupUi(self)
         # 设置忙碌光标图片数组
         self.initCursor([':/icons/icons/Cursors/%d.png' %
                          i for i in range(8)], self)
         self.setCursorTimeout(100)
+        self.version_list = None
         self.btn_start.clicked.connect(self.decrypt)
         self.btn_getinfo.clicked.connect(self.get_info)
         self.btn_db_dir.clicked.connect(self.select_db_dir)
@@ -38,7 +43,6 @@ class DecryptControl(QWidget, decryptUi.Ui_Dialog, QCursorGif):
         self.btn_db_dir.setIcon(Icon.Folder_Icon)
         self.btn_start.setIcon(Icon.Start_Icon)
         self.btn_help.setIcon(Icon.Help_Icon)
-        self.label_tip.setVisible(False)
         self.info = {}
         self.lineEdit.setFocus()
         self.ready = False
@@ -53,7 +57,7 @@ class DecryptControl(QWidget, decryptUi.Ui_Dialog, QCursorGif):
     # @log
     def get_info(self):
         self.startBusy()
-        self.get_info_thread = MyThread()
+        self.get_info_thread = MyThread(self.version_list)
         self.get_info_thread.signal.connect(self.set_info)
         self.get_info_thread.start()
 
@@ -62,7 +66,10 @@ class DecryptControl(QWidget, decryptUi.Ui_Dialog, QCursorGif):
         if result[0] == -1:
             QMessageBox.critical(self, "错误", "请登录微信")
         elif result[0] == -2:
-            QMessageBox.critical(self, "错误", "微信版本不匹配\n请更新微信版本为:3.9.8.25")
+            self.versionErrorSignal.emit(result[1])
+            QMessageBox.critical(self, "错误",
+                                 "微信版本不匹配\n请手动填写信息")
+
         elif result[0] == -3:
             QMessageBox.critical(self, "错误", "WeChat WeChatWin.dll Not Found")
         elif result[0] == -10086:
@@ -77,12 +84,14 @@ class DecryptControl(QWidget, decryptUi.Ui_Dialog, QCursorGif):
             self.label_pid.setText(str(self.info['pid']))
             self.label_version.setText(self.info['version'])
             self.lineEdit.setFocus()
+            self.checkBox.setCheckable(True)
             self.checkBox.setChecked(True)
             self.get_wxidSignal.emit(self.info['wxid'])
             directory = os.path.join(path.wx_path(), self.info['wxid'])
             if os.path.exists(directory):
                 self.label_db_dir.setText(directory)
                 self.wx_dir = directory
+                self.checkBox_2.setCheckable(True)
                 self.checkBox_2.setChecked(True)
                 self.ready = True
             if self.ready:
@@ -110,13 +119,14 @@ class DecryptControl(QWidget, decryptUi.Ui_Dialog, QCursorGif):
 
         self.label_db_dir.setText(directory)
         self.wx_dir = directory
+        self.checkBox_2.setCheckable(True)
         self.checkBox_2.setChecked(True)
         if self.ready:
             self.label_ready.setText('已就绪')
 
     def decrypt(self):
         if not self.ready:
-            QMessageBox.critical(self, "错误", "请先获取密钥")
+            QMessageBox.critical(self, "错误", "请先获取信息")
             return
         if not self.wx_dir:
             QMessageBox.critical(self, "错误", "请先选择微信安装路径")
@@ -131,16 +141,15 @@ class DecryptControl(QWidget, decryptUi.Ui_Dialog, QCursorGif):
                 return
         if self.info.get('key') == 'None':
             QMessageBox.critical(self, "错误",
-                                 "密钥错误\n将软件放在桌面上试试\n如果还不可以的话我也我能为力，您可以等待后续版本解决该问题")
+                                 "密钥错误\n请查看教程解决相关问题")
         close_db()
-        self.label_tip.setVisible(True)
-        self.label_tip.setText('点我之后没有反应那就多等儿吧,不要再点了')
         self.thread2 = DecryptThread(db_dir, self.info['key'])
         self.thread2.maxNumSignal.connect(self.setProgressBarMaxNum)
         self.thread2.signal.connect(self.progressBar_view)
         self.thread2.okSignal.connect(self.btnExitClicked)
         self.thread2.errorSignal.connect(
-            lambda x: QMessageBox.critical(self, "错误", "错误\n请检查微信版本是否为最新和微信路径是否正确\n或者关闭微信多开")
+            lambda x: QMessageBox.critical(self, "错误",
+                                           "错误\n请检查微信版本是否为最新和微信路径是否正确\n或者关闭微信多开")
         )
         self.thread2.start()
 
@@ -148,11 +157,12 @@ class DecryptControl(QWidget, decryptUi.Ui_Dialog, QCursorGif):
         # print("enter clicked")
         # 中间可以添加处理逻辑
         # QMessageBox.about(self, "解密成功", "数据库文件存储在app/DataBase/Msg文件夹下")
-
+        self.progressBar_view(self.max_val)
         self.DecryptSignal.emit(True)
         # self.close()
 
     def setProgressBarMaxNum(self, max_val):
+        self.max_val = max_val
         self.progressBar.setRange(0, max_val)
 
     def progressBar_view(self, value):
@@ -176,12 +186,12 @@ class DecryptControl(QWidget, decryptUi.Ui_Dialog, QCursorGif):
 
         try:
             os.makedirs('./app/data', exist_ok=True)
-            with open('./app/data/info.json', 'w', encoding='utf-8') as f:
-                f.write(json.dumps(dic))
+            with open(info_file_path, "w", encoding="utf-8") as f:
+                json.dump(dic, f, ensure_ascii=False, indent=4)
         except:
             with open('./info.json', 'w', encoding='utf-8') as f:
                 f.write(json.dumps(dic))
-
+        self.progressBar_view(self.max_val)
         self.DecryptSignal.emit(True)
         self.close()
 
@@ -206,7 +216,7 @@ class DecryptThread(QThread):
         msg_db.close()
         # micro_msg_db.close()
         # hard_link_db.close()
-        output_dir = 'app/DataBase/Msg'
+        output_dir = db_dir
         os.makedirs(output_dir, exist_ok=True)
         tasks = []
         if os.path.exists(self.db_path):
@@ -226,36 +236,40 @@ class DecryptThread(QThread):
             self.signal.emit(str(i))
         # print(self.db_path)
         # 目标数据库文件
-        target_database = "app/DataBase/Msg/MSG.db"
+        target_database = os.path.join(db_dir, 'MSG.db')
         # 源数据库文件列表
-        source_databases = [f"app/DataBase/Msg/MSG{i}.db" for i in range(1, 50)]
+        source_databases = [os.path.join(db_dir, f"MSG{i}.db") for i in range(1, 50)]
         import shutil
         if os.path.exists(target_database):
             os.remove(target_database)
         try:
-            shutil.copy2("app/DataBase/Msg/MSG0.db", target_database)  # 使用一个数据库文件作为模板
+            shutil.copy2(os.path.join(db_dir, 'MSG0.db'), target_database)  # 使用一个数据库文件作为模板
         except FileNotFoundError:
+            logger.error(traceback.format_exc())
             self.errorSignal.emit(True)
         # 合并数据库
         try:
             merge_databases(source_databases, target_database)
         except FileNotFoundError:
+            logger.error(traceback.format_exc())
             QMessageBox.critical("错误", "数据库不存在\n请检查微信版本是否为最新")
 
         # 音频数据库文件
-        target_database = "app/DataBase/Msg/MediaMSG.db"
+        target_database = os.path.join(db_dir,'MediaMSG.db')
         # 源数据库文件列表
         if os.path.exists(target_database):
             os.remove(target_database)
-        source_databases = [f"app/DataBase/Msg/MediaMSG{i}.db" for i in range(1, 50)]
+        source_databases = [os.path.join(db_dir,f"MediaMSG{i}.db") for i in range(1, 50)]
         try:
-            shutil.copy2("app/DataBase/Msg/MediaMSG0.db", target_database)  # 使用一个数据库文件作为模板
+            shutil.copy2(os.path.join(db_dir,'MediaMSG0.db'), target_database)  # 使用一个数据库文件作为模板
         except FileNotFoundError:
+            logger.error(traceback.format_exc())
             self.errorSignal.emit(True)
         # 合并数据库
         try:
             merge_MediaMSG_databases(source_databases, target_database)
         except FileNotFoundError:
+            logger.error(traceback.format_exc())
             QMessageBox.critical("错误", "数据库不存在\n请检查微信版本是否为最新")
         self.okSignal.emit('ok')
         # self.signal.emit('100')
@@ -264,19 +278,40 @@ class DecryptThread(QThread):
 class MyThread(QThread):
     signal = pyqtSignal(list)
 
-    def __init__(self):
+    def __init__(self, version_list=None):
         super(MyThread, self).__init__()
+        self.version_list = version_list
 
     def __del__(self):
         pass
 
+    def get_bias_add(self, version):
+        url = "http://api.lc044.love/wxBiasAddr"
+        data = {
+            'version': version
+        }
+        try:
+            response = requests.get(url, json=data)
+            print(response)
+            print(response.text)
+            if response.status_code == 200:
+                update_info = response.json()
+                return update_info
+            else:
+                return {}
+        except:
+            return {}
+
     def run(self):
-        file_path = './app/resources/data/version_list.json'
-        if not os.path.exists(file_path):
-            resource_dir = getattr(sys, '_MEIPASS', os.path.abspath(os.path.dirname(__file__)))
-            file_path = os.path.join(resource_dir, 'app', 'resources', 'data','version_list.json')
-        with open(file_path, "r", encoding="utf-8") as f:
-            VERSION_LIST = json.loads(f.read())
+        if self.version_list:
+            VERSION_LIST = self.version_list
+        else:
+            file_path = './app/resources/data/version_list.json'
+            if not os.path.exists(file_path):
+                resource_dir = getattr(sys, '_MEIPASS', os.path.abspath(os.path.dirname(__file__)))
+                file_path = os.path.join(resource_dir, 'app', 'resources', 'data', 'version_list.json')
+            with open(file_path, "r", encoding="utf-8") as f:
+                VERSION_LIST = json.loads(f.read())
         try:
             result = get_wx_info.get_info(VERSION_LIST)
             if result == -1:
@@ -285,6 +320,16 @@ class MyThread(QThread):
                 result = [result]
             elif result == -3:
                 result = [result]
+            elif isinstance(result, str):
+                version = result
+                # version = '3.9.9.43'
+                version_bias = self.get_bias_add(version)
+                if version_bias.get(version):
+                    logger.info(f"从云端获取内存基址:{version_bias}")
+                    result = get_wx_info.get_info(version_bias)
+                else:
+                    logger.info(f"从云端获取内存基址失败:{version}")
+                    result = [-2, version]
         except:
             logger.error(traceback.format_exc())
             result = [-10086]

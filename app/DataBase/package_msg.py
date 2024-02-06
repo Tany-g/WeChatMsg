@@ -3,7 +3,7 @@ import threading
 from app.DataBase import msg_db, micro_msg_db, misc_db
 from app.util.protocbuf.msg_pb2 import MessageBytesExtra
 from app.util.protocbuf.roomdata_pb2 import ChatRoomData
-from app.person import ContactPC, MePC, ContactDefault
+from app.person import Contact, Me, ContactDefault
 
 lock = threading.Lock()
 
@@ -107,15 +107,15 @@ class PackageMsg:
             a[9]: msgSvrId,
             a[10]: BytesExtra,
             a[11]: CompressContent,
-            a[12]: msg_sender, （ContactPC 或 ContactDefault 类型，这个才是群聊里的信息发送人，不是群聊或者自己是发送者没有这个字段）
+            a[12]: DisplayContent,
+            a[13]: msg_sender, （ContactPC 或 ContactDefault 类型，这个才是群聊里的信息发送人，不是群聊或者自己是发送者没有这个字段）
         '''
         updated_messages = []  # 用于存储修改后的消息列表
-
         messages = msg_db.get_messages(chatroom_wxid)
         for row in messages:
             message = list(row)
             if message[4] == 1: # 自己发送的就没必要解析了
-                message.append(MePC())
+                message.append(Me())
                 updated_messages.append(message)
                 continue
             if message[10] is None: # BytesExtra是空的跳过
@@ -146,11 +146,11 @@ class PackageMsg:
                 'NickName': contact_info_list[4],
                 'smallHeadImgUrl': contact_info_list[7]
             }
-            contact = ContactPC(contact_info)
+            contact = Contact(contact_info)
             contact.smallHeadImgBLOG = misc_db.get_avatar_buffer(contact.wxid)
             contact.set_avatar(contact.smallHeadImgBLOG)
             message.append(contact)
-            updated_messages.append(message)
+            updated_messages.append(tuple(message))
         return updated_messages
 
     def get_chatroom_member_list(self, strtalker):

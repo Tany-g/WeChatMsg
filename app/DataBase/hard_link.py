@@ -2,27 +2,29 @@ import binascii
 import os.path
 import sqlite3
 import threading
+import traceback
 import xml.etree.ElementTree as ET
 
-from app.log import log
+from app.log import log, logger
+from app.util.protocbuf.msg_pb2 import MessageBytesExtra
 
 image_db_lock = threading.Lock()
 video_db_lock = threading.Lock()
 image_db_path = "./app/Database/Msg/HardLinkImage.db"
 video_db_path = "./app/Database/Msg/HardLinkVideo.db"
-root_path = 'FileStorage/MsgAttach/'
-video_root_path = 'FileStorage/Video/'
+root_path = "FileStorage/MsgAttach/"
+video_root_path = "FileStorage/Video/"
 
 
 @log
-def get_md5_from_xml(content, type_='img'):
+def get_md5_from_xml(content, type_="img"):
     try:
         # 解析XML
         root = ET.fromstring(content)
-        if type_ == 'img':
+        if type_ == "img":
             # 提取md5的值
             md5_value = root.find(".//img").get("md5")
-        elif type_ == 'video':
+        elif type_ == "video":
             md5_value = root.find(".//videomsg").get("md5")
         # print(md5_value)
         return md5_value
@@ -30,137 +32,63 @@ def get_md5_from_xml(content, type_='img'):
         return None
 
 
-
-class tencent_struct:
-    def __setVals__(self, data, off):
-        if data:
-            self.__data = data
-        if self.__data:
-            self.__size = len(self.__data)
-        self.__off = off
-
-    def __readString(self):
-        try:
-            length = self.__readUleb()
-            res = self.__data[self.__off : self.__off + length]
-            self.__add(length)
-        except:
-            raise
-        return res.decode("utf-8")
-
-    def __readUleb(self):
-        try:
-            i = self.__data[self.__off]
-            self.__add()
-            if i & 0x80:
-                j = self.__data[self.__off]
-                i = i & 0x7F
-                i = i | (j << 7)
-                self.__add()
-                if i & 0x4000:
-                    j = self.__data[self.__off]
-                    i = i & 0x3FFF
-                    i = i | (j << 14)
-                    self.__add()
-                    if i & 0x200000:
-                        j = self.__data[self.__off]
-                        i = i & 0x1FFFFF
-                        i = i | (j << 21)
-                        self.__add()
-                        if i & 0x10000000:
-                            j = self.__data[self.__off]
-                            i = i & 0xFFFFFFF
-                            i = i | (j << 28)
-                            self.__add()
-            return i
-        except:
-            raise
-
-    def __readData(self):
-        try:
-            length = self.__readUleb()
-            data = self.__data[self.__off : self.__off + length]
-            self.__add(length)
-            return data
-        except:
-            raise
-
-    def __init__(self, data=None, off=0):
-        self.__data = data
-        self.__off = off
-        if self.__data:
-            self.__size = len(self.__data)
-        else:
-            self.__size = 0
-
-    def __add(self, value=1):
-        self.__off += value
-        if self.__off > self.__size:
-            raise "偏移量超出size"
-
-    def readStruct(self, struct_type):
-        current_dict = None
-        if isinstance(struct_type, str):
-            current_dict = getattr(self, struct_type)
-        else:
-            current_dict = struct_type
-        res = {}
-        try:
-            while self.__off < self.__size:
-                key = self.__readUleb()
-                key = key >> 3
-                if key == 0:
-                    break
-                op = None
-                fieldName = ""
-                if key in current_dict:
-                    op = current_dict[key][1]
-                    fieldName = current_dict[key][0]
-                else:
-                    break
-                if isinstance(op, dict):
-                    if not key in res:
-                        res[key] = []
-                    current_struct = self.__readData()
-                    recursion = tencent_struct(current_struct)
-                    res[key].append((fieldName, recursion.readStruct(op)))
-                elif op != "":
-                    res[key] = (fieldName, self.__contenttype__[op](self))
-                else:
-                    break
-        except:
-            raise
-        return res
-
-    __struct1__ = {1: ("", "I"), 2: ("", "I")}
-
-    __msgInfo__ = {1: ("", "I"), 2: ("msg_info", "s")}
-
-    __bytesExtra__ = {
-        1: ("", __struct1__),
-        3: ("msg_info_struct", __msgInfo__),
+def decodeExtraBuf(extra_buf_content: bytes):
+    if not extra_buf_content:
+        return {
+            "region": ('', '', ''),
+            "signature": '',
+            "telephone": '',
+            "gender": 0,
+        }
+    trunkName = {
+        b"\x46\xCF\x10\xC4": "个性签名",
+        b"\xA4\xD9\x02\x4A": "国家",
+        b"\xE2\xEA\xA8\xD1": "省份",
+        b"\x1D\x02\x5B\xBF": "市",
+        # b"\x81\xAE\x19\xB4": "朋友圈背景url",
+        # b"\xF9\x17\xBC\xC0": "公司名称",
+        # b"\x4E\xB9\x6D\x85": "企业微信属性",
+        # b"\x0E\x71\x9F\x13": "备注图片",
+        b"\x75\x93\x78\xAD": "手机号",
+        b"\x74\x75\x2C\x06": "性别",
     }
-
-    def get_bytesExta_Content(self, data=None, off=0):
-        self.__setVals__(data, off)
-        try:
-            return self.readStruct("__bytesExtra__")
-        except:
-            raise
-
-    __contenttype__ = {
-        "s": __readString,
-        "I": __readUleb,
-        "P": __readData,
-    }
-
-
-def parseBytes(content: bytes):
+    res = {"手机号": ""}
+    off = 0
     try:
-        bytesExtra = tencent_struct().get_bytesExta_Content(content)
-        return bytesExtra
+        for key in trunkName:
+            trunk_head = trunkName[key]
+            try:
+                off = extra_buf_content.index(key) + 4
+            except:
+                pass
+            char = extra_buf_content[off: off + 1]
+            off += 1
+            if char == b"\x04":  # 四个字节的int，小端序
+                intContent = extra_buf_content[off: off + 4]
+                off += 4
+                intContent = int.from_bytes(intContent, "little")
+                res[trunk_head] = intContent
+            elif char == b"\x18":  # utf-16字符串
+                lengthContent = extra_buf_content[off: off + 4]
+                off += 4
+                lengthContent = int.from_bytes(lengthContent, "little")
+                strContent = extra_buf_content[off: off + lengthContent]
+                off += lengthContent
+                res[trunk_head] = strContent.decode("utf-16").rstrip("\x00")
+        return {
+            "region": (res["国家"], res["省份"], res["市"]),
+            "signature": res["个性签名"],
+            "telephone": res["手机号"],
+            "gender": res["性别"],
+        }
     except:
-        pass
+        logger.error(f'联系人解析错误:\n{traceback.format_exc()}')
+        return {
+            "region": ('', '', ''),
+            "signature": '',
+            "telephone": '',
+            "gender": 0,
+        }
 
 
 def singleton(cls):
@@ -206,13 +134,13 @@ class HardLink:
             return None
         if not self.open_flag:
             return None
-        sql = '''
+        sql = """
             select Md5Hash,MD5,FileName,HardLinkImageID.Dir as DirName1,HardLinkImageID2.Dir as DirName2
             from HardLinkImageAttribute
             join HardLinkImageID on HardLinkImageAttribute.DirID1 = HardLinkImageID.DirID
             join HardLinkImageID as HardLinkImageID2 on HardLinkImageAttribute.DirID2 = HardLinkImageID2.DirID
             where MD5 = ?;
-            '''
+            """
         try:
             image_db_lock.acquire(True)
             try:
@@ -230,16 +158,18 @@ class HardLink:
             return None
         if not self.open_flag:
             return None
-        sql = '''
+        sql = """
             select Md5Hash,MD5,FileName,HardLinkVideoID2.Dir as DirName2
             from HardLinkVideoAttribute
             join HardLinkVideoID as HardLinkVideoID2 on HardLinkVideoAttribute.DirID2 = HardLinkVideoID2.DirID
             where MD5 = ?;
-            '''
+            """
         try:
             video_db_lock.acquire(True)
             try:
                 self.video_cursor.execute(sql, [md5])
+            except sqlite3.OperationalError:
+                return None
             except AttributeError:
                 self.init_database()
                 self.video_cursor.execute(sql, [md5])
@@ -248,43 +178,86 @@ class HardLink:
         finally:
             video_db_lock.release()
 
-    def get_image(self, content, bytesExtra, thumb=False):
-        bytesDict = parseBytes(bytesExtra)
-        for msginfo in bytesDict[3]:
-            if msginfo[1][1][1] == (3 if thumb else 4):
-                pathh = msginfo[1][2][1] # wxid\FileStorage\...
-                pathh = "\\".join(pathh.split('\\')[1:])
-                return pathh
+    def get_image_original(self, content, bytesExtra) -> str:
+        msg_bytes = MessageBytesExtra()
+        msg_bytes.ParseFromString(bytesExtra)
+        result = ''
+        for tmp in msg_bytes.message2:
+            if tmp.field1 != 4:
+                continue
+            pathh = tmp.field2  # wxid\FileStorage\...
+            pathh = "\\".join(pathh.split("\\")[1:])
+            return pathh
         md5 = get_md5_from_xml(content)
         if not md5:
-            return None
-        result = self.get_image_by_md5(binascii.unhexlify(md5))
+            pass
+        else:
+            result = self.get_image_by_md5(binascii.unhexlify(md5))
+            if result:
+                dir1 = result[3]
+                dir2 = result[4]
+                data_image = result[2]
+                dir0 = "Image"
+                dat_image = os.path.join(root_path, dir1, dir0, dir2, data_image)
+                result = dat_image
+        return result
 
-        if result:
-            dir1 = result[3]
-            dir2 = result[4]
-            data_image = result[2]
-            dir0 = 'Thumb' if thumb else 'Image'
-            dat_image = os.path.join(root_path, dir1, dir0, dir2, data_image)
-            return dat_image
+    def get_image_thumb(self, content, bytesExtra) -> str:
+        msg_bytes = MessageBytesExtra()
+        msg_bytes.ParseFromString(bytesExtra)
+        result = ''
+        for tmp in msg_bytes.message2:
+            if tmp.field1 != 3:
+                continue
+            pathh = tmp.field2  # wxid\FileStorage\...
+            pathh = "\\".join(pathh.split("\\")[1:])
+            return pathh
+        md5 = get_md5_from_xml(content)
+        if not md5:
+            pass
+        else:
+            result = self.get_image_by_md5(binascii.unhexlify(md5))
+            if result:
+                dir1 = result[3]
+                dir2 = result[4]
+                data_image = result[2]
+                dir0 = "Thumb"
+                dat_image = os.path.join(root_path, dir1, dir0, dir2, data_image)
+                result = dat_image
+        return result
+
+    def get_image(self, content, bytesExtra, up_dir="", thumb=False) -> str:
+        msg_bytes = MessageBytesExtra()
+        msg_bytes.ParseFromString(bytesExtra)
+        if thumb:
+            result = self.get_image_thumb(content, bytesExtra)
+        else:
+            result = self.get_image_original(content, bytesExtra)
+            if not (result and os.path.exists(os.path.join(up_dir, result))):
+                result = self.get_image_thumb(content, bytesExtra)
+        return result
 
     def get_video(self, content, bytesExtra, thumb=False):
-        bytesDict = parseBytes(bytesExtra)
-        for msginfo in bytesDict[3]:
-            if msginfo[1][1][1] == (3 if thumb else 4):
-                pathh = msginfo[1][2][1] # wxid\FileStorage\...
-                pathh = "\\".join(pathh.split('\\')[1:])
-                return pathh
-        md5 = get_md5_from_xml(content, type_='video')
+        msg_bytes = MessageBytesExtra()
+        msg_bytes.ParseFromString(bytesExtra)
+        for tmp in msg_bytes.message2:
+            if tmp.field1 != (3 if thumb else 4):
+                continue
+            pathh = tmp.field2  # wxid\FileStorage\...
+            pathh = "\\".join(pathh.split("\\")[1:])
+            return pathh
+        md5 = get_md5_from_xml(content, type_="video")
         if not md5:
-            return None
+            return ''
         result = self.get_video_by_md5(binascii.unhexlify(md5))
         if result:
             dir2 = result[3]
-            data_image = result[2].split('.')[0] + '.jpg' if thumb else result[2]
+            data_image = result[2].split(".")[0] + ".jpg" if thumb else result[2]
             # dir0 = 'Thumb' if thumb else 'Image'
             dat_image = os.path.join(video_root_path, dir2, data_image)
             return dat_image
+        else:
+            return ''
 
     def close(self):
         if self.open_flag:
@@ -304,8 +277,8 @@ class HardLink:
 
 # 6b02292eecea118f06be3a5b20075afc_t
 
-if __name__ == '__main__':
-    msg_root_path = './Msg/'
+if __name__ == "__main__":
+    msg_root_path = "./Msg/"
     image_db_path = "./Msg/HardLinkImage.db"
     video_db_path = "./Msg/HardLinkVideo.db"
     hard_link_db = HardLink()
@@ -315,10 +288,10 @@ if __name__ == '__main__':
     # print(hard_link_db.get_image(content, thumb=False))
     # result = get_md5_from_xml(content)
     # print(result)
-    content = '''<?xml version="1.0"?>
+    content = """<?xml version="1.0"?>
 <msg>
 	<videomsg aeskey="d635d2013d221dbd05a4eab3a8185f5a" cdnvideourl="3057020100044b304902010002040297cead02032f540502042ba7b4de020465673b74042438316562356530652d653764352d343263632d613531642d6464383661313330623965330204052400040201000405004c537500" cdnthumbaeskey="d635d2013d221dbd05a4eab3a8185f5a" cdnthumburl="3057020100044b304902010002040297cead02032f540502042ba7b4de020465673b74042438316562356530652d653764352d343263632d613531642d6464383661313330623965330204052400040201000405004c537500" length="25164270" playlength="60" cdnthumblength="7419" cdnthumbwidth="1920" cdnthumbheight="1080" fromusername="wxid_yt67eeoo4blm22" md5="95558f0e503651375b475636519d2285" newmd5="4ece19bcd92dc5b93b83f397461a1310" isplaceholder="0" rawmd5="d660ba186bb31126d94fa568144face8" rawlength="143850007" cdnrawvideourl="3052020100044b30490201000204d8cd585302032f540502040f6a42b7020465673b85042464666462306634342d653339342d343232302d613534392d3930633030646236306266610204059400040201000400" cdnrawvideoaeskey="5915b14ac8d121e0944d9e444aebb7ed" overwritenewmsgid="0" originsourcemd5="a1a567d8c170bca33d075b787a60dd3f" isad="0" />
 </msg>
-'''
+"""
     print(hard_link_db.get_video(content))
     print(hard_link_db.get_video(content, thumb=True))
